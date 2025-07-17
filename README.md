@@ -107,6 +107,9 @@ qgjob config --default-environment emulator
 ```
 
 ## 📋 API Reference
+You can explore and test the API directly using Swagger:
+
+- **URL**: [http://localhost:3001/docs](http://localhost:3001/docs)
 
 ### Submit Job
 ```bash
