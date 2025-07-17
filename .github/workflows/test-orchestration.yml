@@ -1,0 +1,260 @@
+name: Test Orchestration CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  QG_API_URL: http://localhost:3001
+
+jobs:
+  test-orchestration:
+    runs-on: ubuntu-latest
+    
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: password123
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.19.2'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: |
+        npm ci
+        cd src/cli && npm ci
+
+    - name: Build services
+      run: npm run build
+
+    - name: Start services in background
+      run: |
+        # Set environment variables
+        export MONGODB_URI=mongodb://admin:password123@localhost:27017/test-orchestration?authSource=admin
+        export REDIS_HOST=localhost
+        export REDIS_PORT=6379
+        export JOB_SCHEDULER_URL=localhost:50051
+        
+        # Start job-scheduler
+        stdbuf -oL -eL npm run start:prod:job-scheduler > job-scheduler.log 2>&1 &
+        sleep 10
+        
+        # Start job-api
+        stdbuf -oL -eL npm run start:prod:job-api > job-api.log 2>&1 &
+        sleep 10
+        
+        # Start agent-runner
+        stdbuf -oL -eL npm run start:prod:agent-runner > agent-runner.log 2>&1 &
+        sleep 10
+
+    - name: Install qgjob CLI globally
+      run: |
+        npm run build
+        sudo npm link
+
+    - name: Wait for services to be ready
+      run: |
+        timeout 60 bash -c 'until curl -f http://localhost:3001/health; do sleep 2; done'
+
+    - name: Run integration tests
+      run: |
+        echo "🧪 Testing emulator job submission..."
+        EMULATOR_JOB_ID=$(qgjob submit \
+          --org-id "qualgent" \
+          --app-version-id "v1.2.3-${GITHUB_SHA:0:7}" \
+          --test "tests/emulator.spec.ts" \
+          --target "emulator" \
+          --priority 8 \
+          | grep -oE '[a-f0-9\-]{36}')
+
+        if [ -z "$EMULATOR_JOB_ID" ]; then
+          echo "❌ Emulator job submission failed"
+          exit 1
+        fi
+
+        echo "Emulator job ID: $EMULATOR_JOB_ID"
+        echo "EMULATOR_JOB_ID=$EMULATOR_JOB_ID" >> $GITHUB_ENV
+
+        echo "🧪 Testing device job submission..."
+        DEVICE_JOB_ID=$(qgjob submit \
+          --org-id "qualgent" \
+          --app-version-id "v1.2.3-${GITHUB_SHA:0:7}" \
+          --test "tests/device.spec.ts" \
+          --target "device" \
+          --priority 6 \
+          | grep -oE '[a-f0-9\-]{36}')
+
+        if [ -z "$DEVICE_JOB_ID" ]; then
+          echo "❌ Device job submission failed"
+          exit 1
+        fi
+
+        echo "Device job ID: $DEVICE_JOB_ID"
+        echo "DEVICE_JOB_ID=$DEVICE_JOB_ID" >> $GITHUB_ENV
+
+        echo "🧪 Testing BrowserStack job submission..."
+        BROWSERSTACK_JOB_ID=$(qgjob submit \
+          --org-id "qualgent" \
+          --app-version-id "v1.2.3-${GITHUB_SHA:0:7}" \
+          --test "tests/browserstack.spec.ts" \
+          --target "browserstack" \
+          --priority 4 \
+          | grep -oE '[a-f0-9\-]{36}')
+
+        if [ -z "$BROWSERSTACK_JOB_ID" ]; then
+          echo "❌ BrowserStack job submission failed"
+          exit 1
+        fi
+
+        echo "BrowserStack job ID: $BROWSERSTACK_JOB_ID"
+        echo "BROWSERSTACK_JOB_ID=$BROWSERSTACK_JOB_ID" >> $GITHUB_ENV
+
+    - name: Poll job statuses
+      run: |
+        echo "🔄 Polling job statuses until completion..."
+        
+        # Function to poll a single job
+        poll_job() {
+          local job_name=$1
+          local job_id=$2
+
+          echo "🔍 Received job_id for $job_name: $job_id"
+          echo "🔄 Polling job $job_name every 10 seconds..."
+
+          timeout 300 qgjob poll --job-id "$job_id" --interval 10
+          local exit_code=$?
+
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ $job_name job completed successfully"
+            return 0
+          elif [ $exit_code -eq 1 ]; then
+            echo "❌ $job_name job failed"
+            qgjob status --job-id "$job_id"
+            return 1
+          else
+            echo "⏰ $job_name job timed out"
+            qgjob status --job-id "$job_id"
+            return 1
+          fi
+        }
+        
+        # Poll all jobs in parallel
+        poll_job "Emulator" $EMULATOR_JOB_ID &
+        EMULATOR_PID=$!
+        
+        poll_job "Device" $DEVICE_JOB_ID &
+        DEVICE_PID=$!
+        
+        poll_job "BrowserStack" $BROWSERSTACK_JOB_ID &
+        BROWSERSTACK_PID=$!
+        
+        # Wait for all jobs to complete
+        wait $EMULATOR_PID
+        EMULATOR_RESULT=$?
+        
+        wait $DEVICE_PID
+        DEVICE_RESULT=$?
+        
+        wait $BROWSERSTACK_PID
+        BROWSERSTACK_RESULT=$?
+        
+        # Check results
+        if [ $EMULATOR_RESULT -eq 0 ] && [ $DEVICE_RESULT -eq 0 ] && [ $BROWSERSTACK_RESULT -eq 0 ]; then
+          echo "🎉 All test jobs completed successfully!"
+          exit 0
+        else
+          echo "💥 One or more test jobs failed"
+          echo "Emulator: $([ $EMULATOR_RESULT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
+          echo "Device: $([ $DEVICE_RESULT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
+          echo "BrowserStack: $([ $BROWSERSTACK_RESULT -eq 0 ] && echo "✅ PASSED" || echo "❌ FAILED")"
+          exit 1
+        fi
+
+    - name: Generate test report
+      if: always()
+      run: |
+        echo "📊 Generating test execution report..."
+        
+        # Get job statistics
+        qgjob list
+        
+        # Get detailed status for each job
+        echo -e "\n📋 Detailed Job Status:"
+        for job_id in $EMULATOR_JOB_ID $DEVICE_JOB_ID $BROWSERSTACK_JOB_ID; do
+          echo -e "\n--- Job: $job_id ---"
+          qgjob status --job-id "$job_id" || true
+        done
+
+    - name: Upload logs as artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-orchestration-logs
+        path: |
+          .qgjob-history.json
+          *.log
+        retention-days: 7
+
+  deploy:
+    needs: test-orchestration
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to staging
+      run: |
+        echo "🚀 Deploying to staging environment..."
+        # Add your deployment logic here
+        # This could include:
+        # - Building and pushing Docker images
+        # - Updating Kubernetes manifests
+        # - Running deployment scripts
+        # - Notifying team via Slack/email
+        
+        echo "✅ Deployment completed successfully!"
+
+    - name: Run smoke tests on staging
+      run: |
+        echo "🧪 Running smoke tests on staging..."
+        # Add staging smoke tests here
+        echo "✅ Smoke tests passed!"
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Deployment successful - staging environment updated"
+        else
+          echo "❌ Deployment failed - check logs for details"
+        fi

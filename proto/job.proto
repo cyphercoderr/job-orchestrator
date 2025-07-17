@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package job;
+
+service JobSchedulerService {
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+  rpc GetJobsByGroup(GetJobsByGroupRequest) returns (GetJobsByGroupResponse);
+  rpc UpdateJobStatus(UpdateJobStatusRequest) returns (UpdateJobStatusResponse);
+}
+
+message SubmitJobRequest {
+  string job_id = 1;
+  string org_id = 2;
+  string app_version_id = 3;
+  string test_path = 4;
+  string target = 5;
+  int32 priority = 6;
+}
+
+message SubmitJobResponse {
+  string job_id = 1;
+  string status = 2;
+  string message = 3;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+message GetJobStatusResponse {
+  string job_id = 1;
+  string org_id = 2;
+  string app_version_id = 3;
+  string test_path = 4;
+  string target = 5;
+  string status = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  repeated string logs = 9;
+}
+
+message GetJobsByGroupRequest {
+  string app_version_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message GetJobsByGroupResponse {
+  repeated GetJobStatusResponse jobs = 1;
+  int32 total = 2;
+}
+
+message UpdateJobStatusRequest {
+  string job_id = 1;
+  string status = 2;
+  repeated string logs = 3;
+}
+
+message UpdateJobStatusResponse {
+  bool success = 1;
+  string message = 2;
+}

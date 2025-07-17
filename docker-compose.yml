@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: test-orchestration
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - test-orchestration-network
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - test-orchestration-network
+
+  job-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.job-api
+    container_name: job-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://admin:password123@mongodb:27017/test-orchestration?authSource=admin
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis123
+      - JOB_SCHEDULER_URL=job-scheduler:50051
+      - JOB_API_PORT=3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mongodb
+      - redis
+      - job-scheduler
+    networks:
+      - test-orchestration-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  job-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.job-scheduler
+    container_name: job-scheduler
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://admin:password123@mongodb:27017/test-orchestration?authSource=admin
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis123
+      - JOB_SCHEDULER_URL=0.0.0.0:50051
+    ports:
+      - "50051:50051"
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - test-orchestration-network
+
+  agent-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-runner
+    container_name: agent-runner
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://admin:password123@mongodb:27017/test-orchestration?authSource=admin
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis123
+      - JOB_SCHEDULER_URL=job-scheduler:50051
+      - AGENT_RUNNER_PORT=3003
+      - HOSTNAME=agent-runner-1
+    depends_on:
+      - mongodb
+      - redis
+      - job-scheduler
+    networks:
+      - test-orchestration-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  test-orchestration-network:
+    driver: bridge

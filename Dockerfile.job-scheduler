@@ -1,0 +1,23 @@
+FROM node:20.19.2-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY src/ ./src/
+COPY proto/ ./proto/
+
+# Build the application
+RUN npm run build
+
+# Expose gRPC port
+EXPOSE 50051
+
+# Start the application
+CMD ["npm", "run", "start:prod:job-scheduler"]
